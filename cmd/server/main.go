@@ -20,6 +20,7 @@ type RawPacket struct {
 	raw        []byte
 	Version    byte
 	PacketType PacketType
+	PlayerId   uint32
 }
 
 type TCP struct {
@@ -52,12 +53,9 @@ func (t *TCP) Close() {
 const CURRENT_VERSION = 0
 
 var (
-	ErrVersionMismatch = fmt.Errorf("version mismatch")
+	ErrVersionMismatch   = fmt.Errorf("version mismatch")
+	ErrInvalidPacketType = fmt.Errorf("invalid packet type")
 )
-
-// func getHeaders(b byte) {
-
-// }
 
 func ReadToPacket(connReader io.Reader) (*RawPacket, error) {
 	// 8 bits version + 8 bits packet type + 32 bits player id
@@ -71,6 +69,7 @@ func ReadToPacket(connReader io.Reader) (*RawPacket, error) {
 
 	version := headerBuf[0]
 	packetType := headerBuf[1]
+	fmt.Printf("%v %v\n", version, packetType)
 	playerId := binary.BigEndian.Uint32(headerBuf[2:6])
 
 	if version != CURRENT_VERSION {
@@ -78,48 +77,49 @@ func ReadToPacket(connReader io.Reader) (*RawPacket, error) {
 	}
 
 	packet := RawPacket{
-		raw,
+		Version:    version,
+		PacketType: PacketType(packetType),
+		PlayerId:   playerId,
 	}
-
-	p.Version = version
 
 	switch PacketType(packetType) {
-	case PacketTypeHeartbeat, PacketTypeDecrement, PacketTypeIncrement:
-		p.PacketType = PacketType(packetType)
+	case Heartbeat:
+		fmt.Printf("heartbeat %v\n", playerId)
+		return &packet, nil
+	// case PacketTypeHeartbeat, PacketTypeDecrement, PacketTypeIncrement:
+	// 	p.PacketType = PacketType(packetType)
 
-		packetData := make([]byte, 2)
-		_, err := connReader.Read(packetData)
-		if err != nil {
-			return err
-		}
+	// 	packetData := make([]byte, 2)
+	// 	_, err := connReader.Read(packetData)
+	// 	if err != nil {
+	// 		return err
+	// 	}
 
-		p.raw = packetData
-	case PacketTypeGateStatus:
-		p.PacketType = PacketTypeGateStatus
+	// 	p.raw = packetData
+	// case PacketTypeGateStatus:
+	// 	p.PacketType = PacketTypeGateStatus
 
-		gateStatusPacketData := make([]byte, 7)
-		_, err := connReader.Read(gateStatusPacketData)
-		if err != nil {
-			return err
-		}
+	// 	gateStatusPacketData := make([]byte, 7)
+	// 	_, err := connReader.Read(gateStatusPacketData)
+	// 	if err != nil {
+	// 		return err
+	// 	}
 
-		p.raw = gateStatusPacketData
+	// 	p.raw = gateStatusPacketData
 	default:
-		return ErrInvalidPacketType
+		return nil, ErrInvalidPacketType
 	}
-
-	return nil
 }
 
-func (t *TCP) readConnection(conn net.Conn) {
+func (t *TCP) listenConnection(conn net.Conn) {
 	defer t.wg.Done()
 	defer conn.Close()
 	for {
-		rawPacket := &RawPacket{}
+		packet, err := ReadToPacket(conn)
 
-		err := rawPacket.ReadPackets(conn)
 		if err != nil {
 			if errors.Is(err, io.EOF) {
+				// fmt.Println("EOF")
 				slog.Debug("socket received EOF", "error", err)
 			} else {
 				slog.Error("server error:", "error", err)
@@ -128,10 +128,11 @@ func (t *TCP) readConnection(conn net.Conn) {
 		}
 
 		if t.packetsEgress != nil {
-			t.packetsEgress <- rawPacket
+			t.packetsEgress <- packet
 		}
 	}
 
+	// fmt.Println("TTT")
 	slog.Debug("finished reading from connection")
 }
 
@@ -144,17 +145,35 @@ func (t *TCP) Start() {
 		if err != nil {
 			select {
 			case <-t.quit:
+				fmt.Println("Quit!")
 				return
 			default:
 				slog.Error("server error:", "error", err)
 			}
 		}
 
+		fmt.Println("New connection!")
 		t.wg.Add(1)
-		go t.readConnection(conn)
+		go t.listenConnection(conn)
 	}
 }
 
 func main() {
-	fmt.Println("Hello, world!")
+	packetsEgress := make(chan *RawPacket)
+	quit := make(chan interface{})
+	port := 2222
+
+	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+	if err != nil {
+		slog.Error("server error:", "error", err)
+		return
+	}
+
+	tcp := TCP{
+		listener:      listener,
+		packetsEgress: packetsEgress,
+		quit:          quit,
+		wg:            sync.WaitGroup{},
+	}
+	tcp.Start()
 }
