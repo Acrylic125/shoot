@@ -59,7 +59,7 @@ var (
 	ErrInvalidPacketType = fmt.Errorf("invalid packet type")
 )
 
-func ReadToPacket(connReader io.Reader) (*RawPacket, error) {
+func ReadPacket(connReader io.Reader) (*RawPacket, error) {
 	// 8 bits version
 	// + 8 bits packet type
 	// + 8 bits packet size (n bytes, *Packet type should self truncate remainder bits.)
@@ -167,7 +167,7 @@ func (t *TCP) listenConnection(conn net.Conn) {
 		packetChan := make(chan *RawPacket)
 
 		go func() {
-			packet, err := ReadToPacket(conn)
+			packet, err := ReadPacket(conn)
 			if err != nil {
 				if errors.Is(err, io.EOF) {
 					log.Debug().
@@ -187,7 +187,18 @@ func (t *TCP) listenConnection(conn net.Conn) {
 		select {
 		case packet := <-packetChan:
 			if packet != nil {
-				log.Debug().Msg("packet received")
+				// log.Debug().Msg("packet received")
+				switch packet.PacketType {
+				case Heartbeat:
+					log.Debug().Msg("heartbeat received")
+					heartbeatPulsedMutex.Lock()
+					heartbeatPulsed = true
+					heartbeatPulsedMutex.Unlock()
+				default:
+					log.Debug().
+						Int32("packet type", int32(packet.PacketType)).
+						Msg("unhandled packet type")
+				}
 				// if t.packetsEgress != nil {
 				// 	log.Debug().Msg("packet received 2")
 
