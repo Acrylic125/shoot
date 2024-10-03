@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"net"
+	"time"
 )
 
 func main() {
@@ -11,11 +12,14 @@ func main() {
 		fmt.Println("Error connecting:", err)
 		return
 	}
-	// conn.Write([]byte{
-	// 	0, 0, 0, 0, 0, 1,
-	// })
 	for {
-
+		if _, err := conn.Write([]byte{
+			0, 0, 0,
+		}); err != nil {
+			fmt.Println("Error writing:", err)
+			return
+		}
+		time.Sleep(1 * time.Second)
 	}
 	defer conn.Close()
 }

@@ -1,13 +1,16 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net"
 	"sync"
 	"time"
+
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 )
 
 type PacketType byte
@@ -82,7 +85,6 @@ func ReadToPacket(connReader io.Reader) (*RawPacket, error) {
 	if _, err := connReader.Read(bodyBuf); err != nil {
 		return nil, err
 	}
-	fmt.Println(bodyBuf)
 
 	packet := RawPacket{
 		raw:        bodyBuf,
@@ -124,44 +126,40 @@ func (t *TCP) listenConnection(conn net.Conn) {
 	defer conn.Close()
 
 	// Connection state
-	isAliveMutex := sync.RWMutex{}
-	isAlive := true
-	terminateSignalChan := make(chan interface{})
+	ctx, cancel := context.WithCancel(context.Background())
 
 	// Simple heartbeat detection
 	heartbeatPulsedMutex := sync.RWMutex{}
 	heartbeatPulsed := true
 	go func() {
 		for {
-			isAliveMutex.RLock()
-			_isAlive := isAlive
-			isAliveMutex.RUnlock()
-			if !_isAlive {
-				fmt.Println("Connection is no longer alive, breaking.")
-				break
+			select {
+			case <-ctx.Done():
+				log.Debug().
+					Str("from", "heartbeat loop").
+					Msg("connection is no longer alive, ending heartbeat loop.")
+				return
+			case <-time.After(time.Second * 5):
 			}
 
 			heartbeatPulsedMutex.RLock()
 			_heartbeatPulsed := heartbeatPulsed
 			heartbeatPulsedMutex.RUnlock()
 			if !_heartbeatPulsed {
-				if err := conn.Close(); err != nil {
-					fmt.Errorf("server error:", "error", err)
-				}
+				// if err := conn.Close(); err != nil {
+				// 	slog.Error("server error: ", "error", err)
+				// }
 
-				fmt.Println("Closed")
-				// Flag connection as dead
-				isAliveMutex.Lock()
-				isAlive = false
-				isAliveMutex.Unlock()
-				terminateSignalChan <- nil
+				log.Debug().
+					Str("from", "heartbeat loop").
+					Msg("force closing connection.")
+				cancel()
 				break
 			}
 
 			heartbeatPulsedMutex.Lock()
 			heartbeatPulsed = false
 			heartbeatPulsedMutex.Unlock()
-			time.Sleep(time.Second * 5)
 		}
 	}()
 
@@ -171,13 +169,14 @@ func (t *TCP) listenConnection(conn net.Conn) {
 		go func() {
 			packet, err := ReadToPacket(conn)
 			if err != nil {
-				fmt.Println("Hello ")
 				if errors.Is(err, io.EOF) {
-					// fmt.Println("EOF")
-					fmt.Println("EOF ", err)
-					// slog.Debug("socket received EOF", "error", err)
+					log.Debug().
+						AnErr("err", err).
+						Msg("socket received EOF")
 				} else {
-					fmt.Errorf("Server error: %v", err)
+					log.Error().
+						AnErr("err", err).
+						Msg("server error")
 				}
 				packetChan <- nil
 				return
@@ -185,32 +184,27 @@ func (t *TCP) listenConnection(conn net.Conn) {
 			packetChan <- packet
 		}()
 
-		fmt.Println("Now waiting for select...")
 		select {
 		case packet := <-packetChan:
 			if packet != nil {
-				if t.packetsEgress != nil {
-					t.packetsEgress <- packet
-					break
-				}
+				log.Debug().Msg("packet received")
+				// if t.packetsEgress != nil {
+				// 	log.Debug().Msg("packet received 2")
+
+				// 	t.packetsEgress <- packet
+				// 	// break
+				// }
 			} else {
-				fmt.Println("What")
-				isAliveMutex.Lock()
-				isAlive = false
-				isAliveMutex.Unlock()
+				log.Debug().Msg("nil packet received, ending closing connection.")
+				cancel()
 				return
 			}
-		case <-terminateSignalChan:
-			fmt.Println("Terminate signal received, closing connection.")
-			if err := conn.Close(); err != nil {
-				fmt.Errorf("server error: %v", err)
-			}
-			isAliveMutex.Lock()
-			isAlive = false
-			isAliveMutex.Unlock()
+		case <-ctx.Done():
+			log.Debug().
+				Str("from", "connection listener").
+				Msg("termination signal received, ending closing connection.")
 			return
 		}
-		fmt.Println("Finished select")
 
 		// if t.packetsEgress != nil {
 		// 	t.packetsEgress <- packet
@@ -231,24 +225,30 @@ func (t *TCP) Start() {
 				fmt.Println("Quit!")
 				return
 			default:
-				slog.Error("server error:", "error", err)
+				log.Error().
+					AnErr("err", err).
+					Msg("server error")
 			}
 		}
 
-		fmt.Println("New connection!")
+		// fmt.Println("New connection!")
 		t.wg.Add(1)
 		go t.listenConnection(conn)
 	}
 }
 
 func main() {
+	zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
+
 	packetsEgress := make(chan *RawPacket)
 	quit := make(chan interface{})
 	port := 2222
 
 	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
-		slog.Error("server error:", "error", err)
+		log.Error().
+			AnErr("err", err).
+			Msg("server error")
 		return
 	}
 
