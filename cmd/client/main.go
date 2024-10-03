@@ -11,8 +11,11 @@ func main() {
 		fmt.Println("Error connecting:", err)
 		return
 	}
-	conn.Write([]byte{
-		0, 0, 0, 0, 0, 1,
-	})
+	// conn.Write([]byte{
+	// 	0, 0, 0, 0, 0, 1,
+	// })
+	for {
+
+	}
 	defer conn.Close()
 }

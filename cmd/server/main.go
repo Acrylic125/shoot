@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"sync"
+	"time"
 )
 
 type PacketType byte
@@ -121,26 +122,101 @@ func ReadToPacket(connReader io.Reader) (*RawPacket, error) {
 func (t *TCP) listenConnection(conn net.Conn) {
 	defer t.wg.Done()
 	defer conn.Close()
-	for {
-		packet, err := ReadToPacket(conn)
 
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				// fmt.Println("EOF")
-				slog.Debug("socket received EOF", "error", err)
-			} else {
-				slog.Error("server error:", "error", err)
+	// Connection state
+	isAliveMutex := sync.RWMutex{}
+	isAlive := true
+	terminateSignalChan := make(chan interface{})
+
+	// Simple heartbeat detection
+	heartbeatPulsedMutex := sync.RWMutex{}
+	heartbeatPulsed := true
+	go func() {
+		for {
+			isAliveMutex.RLock()
+			_isAlive := isAlive
+			isAliveMutex.RUnlock()
+			if !_isAlive {
+				fmt.Println("Connection is no longer alive, breaking.")
+				break
 			}
-			break
-		}
 
-		if t.packetsEgress != nil {
-			t.packetsEgress <- packet
+			heartbeatPulsedMutex.RLock()
+			_heartbeatPulsed := heartbeatPulsed
+			heartbeatPulsedMutex.RUnlock()
+			if !_heartbeatPulsed {
+				if err := conn.Close(); err != nil {
+					fmt.Errorf("server error:", "error", err)
+				}
+
+				fmt.Println("Closed")
+				// Flag connection as dead
+				isAliveMutex.Lock()
+				isAlive = false
+				isAliveMutex.Unlock()
+				terminateSignalChan <- nil
+				break
+			}
+
+			heartbeatPulsedMutex.Lock()
+			heartbeatPulsed = false
+			heartbeatPulsedMutex.Unlock()
+			time.Sleep(time.Second * 5)
 		}
+	}()
+
+	for {
+		packetChan := make(chan *RawPacket)
+
+		go func() {
+			packet, err := ReadToPacket(conn)
+			if err != nil {
+				fmt.Println("Hello ")
+				if errors.Is(err, io.EOF) {
+					// fmt.Println("EOF")
+					fmt.Println("EOF ", err)
+					// slog.Debug("socket received EOF", "error", err)
+				} else {
+					fmt.Errorf("Server error: %v", err)
+				}
+				packetChan <- nil
+				return
+			}
+			packetChan <- packet
+		}()
+
+		fmt.Println("Now waiting for select...")
+		select {
+		case packet := <-packetChan:
+			if packet != nil {
+				if t.packetsEgress != nil {
+					t.packetsEgress <- packet
+					break
+				}
+			} else {
+				fmt.Println("What")
+				isAliveMutex.Lock()
+				isAlive = false
+				isAliveMutex.Unlock()
+				return
+			}
+		case <-terminateSignalChan:
+			fmt.Println("Terminate signal received, closing connection.")
+			if err := conn.Close(); err != nil {
+				fmt.Errorf("server error: %v", err)
+			}
+			isAliveMutex.Lock()
+			isAlive = false
+			isAliveMutex.Unlock()
+			return
+		}
+		fmt.Println("Finished select")
+
+		// if t.packetsEgress != nil {
+		// 	t.packetsEgress <- packet
+		// }
 	}
 
-	// fmt.Println("TTT")
-	slog.Debug("finished reading from connection")
 }
 
 func (t *TCP) Start() {
