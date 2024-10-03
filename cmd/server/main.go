@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -20,7 +19,6 @@ type RawPacket struct {
 	raw        []byte
 	Version    byte
 	PacketType PacketType
-	PlayerId   uint32
 }
 
 type TCP struct {
@@ -58,33 +56,42 @@ var (
 )
 
 func ReadToPacket(connReader io.Reader) (*RawPacket, error) {
-	// 8 bits version + 8 bits packet type + 32 bits player id
-	// 6 bytes
-	headerBuf := make([]byte, 6)
+	// 8 bits version
+	// + 8 bits packet type
+	// + 8 bits packet size (n bytes, *Packet type should self truncate remainder bits.)
+	// + 8*n bits (body) e.g. n=4 bits player id
+	// min 3 bytes
+	headerBuf := make([]byte, 3)
 
-	_, err := connReader.Read(headerBuf)
-	if err != nil {
+	if _, err := connReader.Read(headerBuf); err != nil {
 		return nil, err
 	}
 
 	version := headerBuf[0]
 	packetType := headerBuf[1]
-	fmt.Printf("%v %v\n", version, packetType)
-	playerId := binary.BigEndian.Uint32(headerBuf[2:6])
+	bodyNumberOfBytes := headerBuf[2]
+	// fmt.Printf("%v %v\n", version, packetType)
+	// playerId := binary.BigEndian.Uint32(headerBuf[2:6])
 
 	if version != CURRENT_VERSION {
 		return nil, ErrVersionMismatch
 	}
 
+	bodyBuf := make([]byte, bodyNumberOfBytes)
+	if _, err := connReader.Read(bodyBuf); err != nil {
+		return nil, err
+	}
+	fmt.Println(bodyBuf)
+
 	packet := RawPacket{
+		raw:        bodyBuf,
 		Version:    version,
 		PacketType: PacketType(packetType),
-		PlayerId:   playerId,
 	}
 
 	switch PacketType(packetType) {
 	case Heartbeat:
-		fmt.Printf("heartbeat %v\n", playerId)
+		// fmt.Printf("heartbeat %v\n", playerId)
 		return &packet, nil
 	// case PacketTypeHeartbeat, PacketTypeDecrement, PacketTypeIncrement:
 	// 	p.PacketType = PacketType(packetType)
