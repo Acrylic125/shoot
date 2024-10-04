@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -17,10 +18,11 @@ type PacketType byte
 
 const (
 	Heartbeat PacketType = 0
+	Move      PacketType = 1
 )
 
 type RawPacket struct {
-	raw        []byte
+	body       []byte
 	Version    byte
 	PacketType PacketType
 }
@@ -87,54 +89,126 @@ func ReadPacket(connReader io.Reader) (*RawPacket, error) {
 	}
 
 	packet := RawPacket{
-		raw:        bodyBuf,
+		body:       bodyBuf,
 		Version:    version,
 		PacketType: PacketType(packetType),
 	}
 
-	switch PacketType(packetType) {
-	case Heartbeat:
-		// fmt.Printf("heartbeat %v\n", playerId)
-		return &packet, nil
-	// case PacketTypeHeartbeat, PacketTypeDecrement, PacketTypeIncrement:
-	// 	p.PacketType = PacketType(packetType)
+	// switch PacketType(packetType) {
+	// case Heartbeat:
+	// 	// fmt.Printf("heartbeat %v\n", playerId)
+	// 	return &packet, nil
+	// // case PacketTypeHeartbeat, PacketTypeDecrement, PacketTypeIncrement:
+	// // 	p.PacketType = PacketType(packetType)
 
-	// 	packetData := make([]byte, 2)
-	// 	_, err := connReader.Read(packetData)
-	// 	if err != nil {
-	// 		return err
-	// 	}
+	// // 	packetData := make([]byte, 2)
+	// // 	_, err := connReader.Read(packetData)
+	// // 	if err != nil {
+	// // 		return err
+	// // 	}
 
-	// 	p.raw = packetData
-	// case PacketTypeGateStatus:
-	// 	p.PacketType = PacketTypeGateStatus
+	// // 	p.raw = packetData
+	// // case PacketTypeGateStatus:
+	// // 	p.PacketType = PacketTypeGateStatus
 
-	// 	gateStatusPacketData := make([]byte, 7)
-	// 	_, err := connReader.Read(gateStatusPacketData)
-	// 	if err != nil {
-	// 		return err
-	// 	}
+	// // 	gateStatusPacketData := make([]byte, 7)
+	// // 	_, err := connReader.Read(gateStatusPacketData)
+	// // 	if err != nil {
+	// // 		return err
+	// // 	}
 
-	// 	p.raw = gateStatusPacketData
-	default:
-		return nil, ErrInvalidPacketType
+	// // 	p.raw = gateStatusPacketData
+	// default:
+	// 	return nil, ErrInvalidPacketType
+	// }
+	return &packet, nil
+}
+
+type Connectio struct {
+	// Connection state
+	conn net.Conn
+
+	// Simple heartbeat detection
+	ctx    context.Context
+	cancel context.CancelFunc
+
+	heartbeatPulsedMutex sync.RWMutex
+	heartbeatPulsed      bool
+
+	started bool
+}
+
+func NewConnection(conn net.Conn) *Connectio {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &Connectio{
+		conn:   conn,
+		ctx:    ctx,
+		cancel: cancel,
+
+		heartbeatPulsedMutex: sync.RWMutex{},
+		heartbeatPulsed:      true,
+
+		started: false,
 	}
 }
 
-func (t *TCP) listenConnection(conn net.Conn) {
+func (c *Connectio) handlePacket(packet *RawPacket) error {
+	if packet == nil {
+		return ErrInvalidPacketType
+	}
+	switch packet.PacketType {
+	case Heartbeat:
+		log.Debug().Msg("heartbeat received")
+		c.setHeartbeatPulsed(true)
+		return nil
+	case Move:
+		if len(packet.body) < 12 {
+			return fmt.Errorf("packet body too short - requires 12 bytes, needs to conform to [4b playerId] [4b positionX] [4b positionY]")
+		}
+		playerId := binary.BigEndian.Uint32(packet.body[0:4])
+		posX := int32(binary.BigEndian.Uint32(packet.body[4:8]))
+		posY := int32(binary.BigEndian.Uint32(packet.body[8:12]))
+
+		log.Debug().
+			Uint32("playerId", playerId).
+			Int32("x", posX).
+			Int32("y", posY).
+			Msg("player move")
+		return nil
+	}
+	return ErrInvalidPacketType
+}
+
+func (c *Connectio) setHeartbeatPulsed(heartbeatPulsed bool) {
+	c.heartbeatPulsedMutex.Lock()
+	c.heartbeatPulsed = heartbeatPulsed
+	c.heartbeatPulsedMutex.Unlock()
+}
+
+func (c *Connectio) isHeartbeatPulsed() bool {
+	c.heartbeatPulsedMutex.RLock()
+	heartbeatPulsed := c.heartbeatPulsed
+	c.heartbeatPulsedMutex.RUnlock()
+	return heartbeatPulsed
+}
+
+func (c *Connectio) listen(t *TCP) error {
+	if c.started {
+		return fmt.Errorf("connection already listening")
+	}
 	defer t.wg.Done()
-	defer conn.Close()
+	defer c.conn.Close()
+	defer func() {
+		c.started = false
+	}()
+
+	c.started = true
 
 	// Connection state
-	ctx, cancel := context.WithCancel(context.Background())
-
-	// Simple heartbeat detection
-	heartbeatPulsedMutex := sync.RWMutex{}
-	heartbeatPulsed := true
 	go func() {
 		for {
 			select {
-			case <-ctx.Done():
+			case <-c.ctx.Done():
 				log.Debug().
 					Str("from", "heartbeat loop").
 					Msg("connection is no longer alive, ending heartbeat loop.")
@@ -142,24 +216,16 @@ func (t *TCP) listenConnection(conn net.Conn) {
 			case <-time.After(time.Second * 5):
 			}
 
-			heartbeatPulsedMutex.RLock()
-			_heartbeatPulsed := heartbeatPulsed
-			heartbeatPulsedMutex.RUnlock()
+			_heartbeatPulsed := c.isHeartbeatPulsed()
 			if !_heartbeatPulsed {
-				// if err := conn.Close(); err != nil {
-				// 	slog.Error("server error: ", "error", err)
-				// }
-
 				log.Debug().
 					Str("from", "heartbeat loop").
 					Msg("force closing connection.")
-				cancel()
+				c.cancel()
 				break
 			}
 
-			heartbeatPulsedMutex.Lock()
-			heartbeatPulsed = false
-			heartbeatPulsedMutex.Unlock()
+			c.setHeartbeatPulsed(false)
 		}
 	}()
 
@@ -167,7 +233,7 @@ func (t *TCP) listenConnection(conn net.Conn) {
 		packetChan := make(chan *RawPacket)
 
 		go func() {
-			packet, err := ReadPacket(conn)
+			packet, err := ReadPacket(c.conn)
 			if err != nil {
 				if errors.Is(err, io.EOF) {
 					log.Debug().
@@ -187,39 +253,24 @@ func (t *TCP) listenConnection(conn net.Conn) {
 		select {
 		case packet := <-packetChan:
 			if packet != nil {
-				// log.Debug().Msg("packet received")
-				switch packet.PacketType {
-				case Heartbeat:
-					log.Debug().Msg("heartbeat received")
-					heartbeatPulsedMutex.Lock()
-					heartbeatPulsed = true
-					heartbeatPulsedMutex.Unlock()
-				default:
-					log.Debug().
-						Int32("packet type", int32(packet.PacketType)).
-						Msg("unhandled packet type")
+				if err := c.handlePacket(packet); err != nil {
+					log.Error().
+						AnErr("err", err).
+						Msg("error handling packet")
+					c.cancel()
+					return nil
 				}
-				// if t.packetsEgress != nil {
-				// 	log.Debug().Msg("packet received 2")
-
-				// 	t.packetsEgress <- packet
-				// 	// break
-				// }
 			} else {
 				log.Debug().Msg("nil packet received, ending closing connection.")
-				cancel()
-				return
+				c.cancel()
+				return nil
 			}
-		case <-ctx.Done():
+		case <-c.ctx.Done():
 			log.Debug().
 				Str("from", "connection listener").
 				Msg("termination signal received, ending closing connection.")
-			return
+			return nil
 		}
-
-		// if t.packetsEgress != nil {
-		// 	t.packetsEgress <- packet
-		// }
 	}
 
 }
@@ -233,7 +284,7 @@ func (t *TCP) Start() {
 		if err != nil {
 			select {
 			case <-t.quit:
-				fmt.Println("Quit!")
+				log.Debug().Msg("quit")
 				return
 			default:
 				log.Error().
@@ -242,9 +293,11 @@ func (t *TCP) Start() {
 			}
 		}
 
-		// fmt.Println("New connection!")
 		t.wg.Add(1)
-		go t.listenConnection(conn)
+		go func() {
+			_conn := NewConnection(conn)
+			_conn.listen(t)
+		}()
 	}
 }
 
