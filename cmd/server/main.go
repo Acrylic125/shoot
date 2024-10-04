@@ -94,33 +94,6 @@ func ReadPacket(connReader io.Reader) (*RawPacket, error) {
 		PacketType: PacketType(packetType),
 	}
 
-	// switch PacketType(packetType) {
-	// case Heartbeat:
-	// 	// fmt.Printf("heartbeat %v\n", playerId)
-	// 	return &packet, nil
-	// // case PacketTypeHeartbeat, PacketTypeDecrement, PacketTypeIncrement:
-	// // 	p.PacketType = PacketType(packetType)
-
-	// // 	packetData := make([]byte, 2)
-	// // 	_, err := connReader.Read(packetData)
-	// // 	if err != nil {
-	// // 		return err
-	// // 	}
-
-	// // 	p.raw = packetData
-	// // case PacketTypeGateStatus:
-	// // 	p.PacketType = PacketTypeGateStatus
-
-	// // 	gateStatusPacketData := make([]byte, 7)
-	// // 	_, err := connReader.Read(gateStatusPacketData)
-	// // 	if err != nil {
-	// // 		return err
-	// // 	}
-
-	// // 	p.raw = gateStatusPacketData
-	// default:
-	// 	return nil, ErrInvalidPacketType
-	// }
 	return &packet, nil
 }
 
