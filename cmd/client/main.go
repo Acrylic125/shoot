@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -86,10 +87,30 @@ func (c *ClientConnection) Start() error {
 
 	c.started = true
 	c.heartbeat()
-	for {
-		packetChan := make(chan *packet.RawPacket)
 
+	packetChan := make(chan *packet.RawPacket)
+	readPacketLockMutex := sync.RWMutex{}
+	readPacketLock := false
+	for {
+		// Lock mechanism is required to prevent a race condition.
+		// For example, if the select statement gets resolved but it was not resolved from
+		// a packet read, this function will be called again causing a race condition.
 		go func() {
+			readPacketLockMutex.Lock()
+			_readPacketLock := readPacketLock
+			if !_readPacketLock {
+				readPacketLock = true
+				defer func() {
+					readPacketLockMutex.Lock()
+					readPacketLock = false
+					readPacketLockMutex.Unlock()
+				}()
+			}
+			readPacketLockMutex.Unlock()
+			if _readPacketLock {
+				return
+			}
+
 			p, err := packet.ReadPacket(c.conn)
 			if err != nil {
 				if errors.Is(err, io.EOF) {
@@ -108,28 +129,81 @@ func (c *ClientConnection) Start() error {
 		}()
 
 		select {
-		case packet := <-packetChan:
-			if packet != nil {
-				if err := c.handlePacket(packet); err != nil {
-					log.Error().
-						AnErr("err", err).
-						Msg("error handling packet")
-					c.cancel()
-					return nil
-				}
-			} else {
+		case p := <-packetChan:
+			if p == nil {
 				log.Debug().Msg("nil packet received, ending closing connection.")
 				c.cancel()
 				return nil
 			}
+			c.handlePacket(p)
 		case <-c.ctx.Done():
 			log.Debug().
 				Str("from", "connection listener").
 				Msg("termination signal received, ending closing connection.")
 			return nil
+		case <-time.After(time.Second * 1):
+			log.Debug().Msg("sending packet")
+			if _, err := c.conn.Write([]byte{
+				0, 1, 12,
+				0xf, 0, 0, 1,
+				0xff, 0xff, 0xff, 0,
+				0, 0, 0, 0xff,
+			}); err != nil {
+				fmt.Println("Error writing:", err)
+				return nil
+			}
 		}
 	}
+	// log.Debug().
+	// 	Int8("version", int8(p.Version)).
+	// 	Int8("packet", int8(p.PacketType)).
+	// 	Bytes("packet", p.Body).
+	// 	Msg("packet received")
 }
+
+// for {
+// 	packetChan := make(chan *packet.RawPacket)
+
+// 	go func() {
+// 		p, err := packet.ReadPacket(c.conn)
+// 		if err != nil {
+// 			if errors.Is(err, io.EOF) {
+// 				log.Debug().
+// 					AnErr("err", err).
+// 					Msg("socket received EOF")
+// 			} else {
+// 				log.Error().
+// 					AnErr("err", err).
+// 					Msg("server error")
+// 			}
+// 			packetChan <- nil
+// 			return
+// 		}
+// 		packetChan <- p
+// 	}()
+
+// 	select {
+// 	case packet := <-packetChan:
+// 		if packet != nil {
+// 			if err := c.handlePacket(packet); err != nil {
+// 				log.Error().
+// 					AnErr("err", err).
+// 					Msg("error handling packet")
+// 				c.cancel()
+// 				return nil
+// 			}
+// 		} else {
+// 			log.Debug().Msg("nil packet received, ending closing connection.")
+// 			c.cancel()
+// 			return nil
+// 		}
+// 	case <-c.ctx.Done():
+// 		log.Debug().
+// 			Str("from", "connection listener").
+// 			Msg("termination signal received, ending closing connection.")
+// 		return nil
+// 	}
+// }
 
 func NewClientConnection(conn net.Conn) *ClientConnection {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -146,7 +220,6 @@ func main() {
 		fmt.Println("Error connecting:", err)
 		return
 	}
-	// defer conn.Close()
 
 	client := NewClientConnection(conn)
 	client.Start()

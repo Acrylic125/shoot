@@ -15,28 +15,38 @@ import (
 	"shoot.me/shoot/packet"
 )
 
-type TCP struct {
-	listener      net.Listener
-	packetsEgress chan<- *packet.RawPacket
-	quit          chan interface{}
-	wg            sync.WaitGroup
+// type PacketEgressSender = chan<- *packet.RawPacket
+// type PacketEgressReceiver = <-chan *packet.RawPacket
+
+type TCPServer struct {
+	listener net.Listener
+
+	// packetsEgressSender   PacketEgressSender
+	// packetsEgressReceiver PacketEgressReceiver
+
+	quit chan interface{}
+	wg   sync.WaitGroup
+
+	connectionsMutex sync.RWMutex
+	connections      []*ServerSideClientConnection
 }
 
-func NewTCPServer(port uint16, packetsEgress chan<- *packet.RawPacket) (*TCP, error) {
+func NewTCPServer(port uint16, packetsEgress chan *packet.RawPacket) (*TCPServer, error) {
 	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
 		return nil, err
 	}
 
-	return &TCP{
-		listener:      listener,
-		packetsEgress: packetsEgress,
-		quit:          make(chan interface{}),
-		wg:            sync.WaitGroup{},
+	return &TCPServer{
+		listener: listener,
+		// packetsEgressSender:   packetsEgress,
+		// packetsEgressReceiver: packetsEgress,
+		quit: make(chan interface{}),
+		wg:   sync.WaitGroup{},
 	}, nil
 }
 
-func (t *TCP) Close() {
+func (t *TCPServer) Close() {
 	close(t.quit)
 	t.listener.Close()
 	t.wg.Wait()
@@ -49,9 +59,12 @@ var (
 	ErrInvalidPacketType = fmt.Errorf("invalid packet type")
 )
 
-type ClientServerConnection struct {
+type ServerSideClientConnection struct {
 	// Connection state
 	conn net.Conn
+
+	// Egress
+	// packetEgress chan<- *packet.RawPacket
 
 	// Simple heartbeat detection
 	ctx    context.Context
@@ -63,10 +76,13 @@ type ClientServerConnection struct {
 	started bool
 }
 
-func NewConnection(conn net.Conn) *ClientServerConnection {
+func NewConnection(conn net.Conn) *ServerSideClientConnection {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &ClientServerConnection{
-		conn:   conn,
+	return &ServerSideClientConnection{
+		conn: conn,
+
+		// packetEgress: packetEgress,
+
 		ctx:    ctx,
 		cancel: cancel,
 
@@ -77,18 +93,18 @@ func NewConnection(conn net.Conn) *ClientServerConnection {
 	}
 }
 
-func (c *ClientServerConnection) handlePacket(p *packet.RawPacket) error {
+func (c *ServerSideClientConnection) handlePacket(p *packet.RawPacket) (egress *[]*packet.RawPacket, err error) {
 	if p == nil {
-		return ErrInvalidPacketType
+		return nil, ErrInvalidPacketType
 	}
 	switch p.PacketType {
 	case packet.Heartbeat:
 		log.Debug().Msg("heartbeat received")
 		c.setHeartbeatPulsed(true)
-		return nil
+		return nil, nil
 	case packet.Move:
 		if len(p.Body) < 12 {
-			return fmt.Errorf("packet body too short - requires 12 bytes, needs to conform to [4b playerId] [4b positionX] [4b positionY]")
+			return nil, fmt.Errorf("packet body too short - requires 12 bytes, needs to conform to [4b playerId] [4b positionX] [4b positionY]")
 		}
 		playerId := binary.BigEndian.Uint32(p.Body[0:4])
 		posX := int32(binary.BigEndian.Uint32(p.Body[4:8]))
@@ -99,25 +115,33 @@ func (c *ClientServerConnection) handlePacket(p *packet.RawPacket) error {
 			Int32("x", posX).
 			Int32("y", posY).
 			Msg("player move")
-		return nil
+
+		log.Debug().Msg("sending packet to egress")
+		return &[]*packet.RawPacket{
+			{
+				Body:       p.Body,
+				Version:    p.Version,
+				PacketType: p.PacketType,
+			},
+		}, nil
 	}
-	return ErrInvalidPacketType
+	return nil, ErrInvalidPacketType
 }
 
-func (c *ClientServerConnection) setHeartbeatPulsed(heartbeatPulsed bool) {
+func (c *ServerSideClientConnection) setHeartbeatPulsed(heartbeatPulsed bool) {
 	c.heartbeatPulsedMutex.Lock()
 	c.heartbeatPulsed = heartbeatPulsed
 	c.heartbeatPulsedMutex.Unlock()
 }
 
-func (c *ClientServerConnection) isHeartbeatPulsed() bool {
+func (c *ServerSideClientConnection) isHeartbeatPulsed() bool {
 	c.heartbeatPulsedMutex.RLock()
 	heartbeatPulsed := c.heartbeatPulsed
 	c.heartbeatPulsedMutex.RUnlock()
 	return heartbeatPulsed
 }
 
-func (c *ClientServerConnection) listen(t *TCP) error {
+func (c *ServerSideClientConnection) listen(t *TCPServer) error {
 	if c.started {
 		return fmt.Errorf("connection already listening")
 	}
@@ -154,10 +178,26 @@ func (c *ClientServerConnection) listen(t *TCP) error {
 		}
 	}()
 
+	packetChan := make(chan *packet.RawPacket)
+	readPacketLockMutex := sync.RWMutex{}
+	readPacketLock := false
 	for {
-		packetChan := make(chan *packet.RawPacket)
-
 		go func() {
+			readPacketLockMutex.Lock()
+			_readPacketLock := readPacketLock
+			if !_readPacketLock {
+				readPacketLock = true
+				defer func() {
+					readPacketLockMutex.Lock()
+					readPacketLock = false
+					readPacketLockMutex.Unlock()
+				}()
+			}
+			readPacketLockMutex.Unlock()
+			if _readPacketLock {
+				return
+			}
+
 			p, err := packet.ReadPacket(c.conn)
 			if err != nil {
 				if errors.Is(err, io.EOF) {
@@ -178,12 +218,18 @@ func (c *ClientServerConnection) listen(t *TCP) error {
 		select {
 		case packet := <-packetChan:
 			if packet != nil {
-				if err := c.handlePacket(packet); err != nil {
+				egress, err := c.handlePacket(packet)
+				if err != nil {
 					log.Error().
 						AnErr("err", err).
 						Msg("error handling packet")
 					c.cancel()
 					return nil
+				}
+				if egress != nil {
+					for _, p := range *egress {
+						t.Broadcast(p)
+					}
 				}
 			} else {
 				log.Debug().Msg("nil packet received, ending closing connection.")
@@ -200,7 +246,29 @@ func (c *ClientServerConnection) listen(t *TCP) error {
 
 }
 
-func (t *TCP) Start() {
+func (t *TCPServer) Broadcast(p *packet.RawPacket) {
+	packetAsBytes := make([]byte, 0, 3+len(p.Body))
+	// packetAsBytes := make([]byte, 0)
+	packetAsBytes = append(packetAsBytes, p.Version, byte(p.PacketType), byte(len(p.Body)))
+	packetAsBytes = append(packetAsBytes, p.Body...)
+
+	log.Debug().Bytes("packet", packetAsBytes).
+		Int("version", int(p.Version)).
+		Int("packetType", int(p.PacketType)).
+		Int("bodyLength", len(p.Body)).
+		Int("packetAsBytes Length", len(packetAsBytes)).
+		Msg("broadcasting packet")
+	// Send packet to all connections
+	t.connectionsMutex.RLock()
+	for i, conn := range t.connections {
+		log.Debug().Int("index", i).Msg("Sending packet to connection")
+		conn.conn.Write(packetAsBytes)
+	}
+	t.connectionsMutex.RUnlock()
+	log.Debug().Msg("sending packet to connections")
+}
+
+func (t *TCPServer) Start() {
 	t.wg.Add(1)
 	defer t.wg.Done()
 
@@ -208,6 +276,7 @@ func (t *TCP) Start() {
 		conn, err := t.listener.Accept()
 		if err != nil {
 			select {
+			// case p := <-t.packetsEgressReceiver:
 			case <-t.quit:
 				log.Debug().Msg("quit")
 				return
@@ -221,7 +290,26 @@ func (t *TCP) Start() {
 		t.wg.Add(1)
 		go func() {
 			_conn := NewConnection(conn)
+			t.connectionsMutex.Lock()
+			t.connections = append(t.connections, _conn)
+			t.connectionsMutex.Unlock()
+
 			_conn.listen(t)
+			defer func() {
+				t.connectionsMutex.Lock()
+				defer t.connectionsMutex.Unlock()
+
+				foundId := -1
+				for i, conn := range t.connections {
+					if conn == _conn {
+						foundId = i
+						break
+					}
+				}
+				if foundId != -1 {
+					t.connections = append(t.connections[:foundId], t.connections[foundId+1:]...)
+				}
+			}()
 		}()
 	}
 }
@@ -229,7 +317,8 @@ func (t *TCP) Start() {
 func main() {
 	zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
 
-	packetsEgress := make(chan *packet.RawPacket)
+	// packetsEgress := make(chan *packet.RawPacket)
+
 	quit := make(chan interface{})
 	port := 2222
 
@@ -241,11 +330,17 @@ func main() {
 		return
 	}
 
-	tcp := TCP{
-		listener:      listener,
-		packetsEgress: packetsEgress,
-		quit:          quit,
-		wg:            sync.WaitGroup{},
+	tcp := TCPServer{
+		listener: listener,
+
+		// packetsEgressSender:   packetsEgress,
+		// packetsEgressReceiver: packetsEgress,
+
+		quit: quit,
+		wg:   sync.WaitGroup{},
+
+		connectionsMutex: sync.RWMutex{},
+		connections:      make([]*ServerSideClientConnection, 0),
 	}
 	tcp.Start()
 }
