@@ -12,29 +12,17 @@ import (
 
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
+	"shoot.me/shoot/packet"
 )
-
-type PacketType byte
-
-const (
-	Heartbeat PacketType = 0
-	Move      PacketType = 1
-)
-
-type RawPacket struct {
-	body       []byte
-	Version    byte
-	PacketType PacketType
-}
 
 type TCP struct {
 	listener      net.Listener
-	packetsEgress chan<- *RawPacket
+	packetsEgress chan<- *packet.RawPacket
 	quit          chan interface{}
 	wg            sync.WaitGroup
 }
 
-func NewTCPServer(port uint16, packetsEgress chan<- *RawPacket) (*TCP, error) {
+func NewTCPServer(port uint16, packetsEgress chan<- *packet.RawPacket) (*TCP, error) {
 	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
 		return nil, err
@@ -61,43 +49,7 @@ var (
 	ErrInvalidPacketType = fmt.Errorf("invalid packet type")
 )
 
-func ReadPacket(connReader io.Reader) (*RawPacket, error) {
-	// 8 bits version
-	// + 8 bits packet type
-	// + 8 bits packet size (n bytes, *Packet type should self truncate remainder bits.)
-	// + 8*n bits (body) e.g. n=4 bits player id
-	// min 3 bytes
-	headerBuf := make([]byte, 3)
-
-	if _, err := connReader.Read(headerBuf); err != nil {
-		return nil, err
-	}
-
-	version := headerBuf[0]
-	packetType := headerBuf[1]
-	bodyNumberOfBytes := headerBuf[2]
-	// fmt.Printf("%v %v\n", version, packetType)
-	// playerId := binary.BigEndian.Uint32(headerBuf[2:6])
-
-	if version != CURRENT_VERSION {
-		return nil, ErrVersionMismatch
-	}
-
-	bodyBuf := make([]byte, bodyNumberOfBytes)
-	if _, err := connReader.Read(bodyBuf); err != nil {
-		return nil, err
-	}
-
-	packet := RawPacket{
-		body:       bodyBuf,
-		Version:    version,
-		PacketType: PacketType(packetType),
-	}
-
-	return &packet, nil
-}
-
-type Connectio struct {
+type ClientServerConnection struct {
 	// Connection state
 	conn net.Conn
 
@@ -111,9 +63,9 @@ type Connectio struct {
 	started bool
 }
 
-func NewConnection(conn net.Conn) *Connectio {
+func NewConnection(conn net.Conn) *ClientServerConnection {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Connectio{
+	return &ClientServerConnection{
 		conn:   conn,
 		ctx:    ctx,
 		cancel: cancel,
@@ -125,22 +77,22 @@ func NewConnection(conn net.Conn) *Connectio {
 	}
 }
 
-func (c *Connectio) handlePacket(packet *RawPacket) error {
-	if packet == nil {
+func (c *ClientServerConnection) handlePacket(p *packet.RawPacket) error {
+	if p == nil {
 		return ErrInvalidPacketType
 	}
-	switch packet.PacketType {
-	case Heartbeat:
+	switch p.PacketType {
+	case packet.Heartbeat:
 		log.Debug().Msg("heartbeat received")
 		c.setHeartbeatPulsed(true)
 		return nil
-	case Move:
-		if len(packet.body) < 12 {
+	case packet.Move:
+		if len(p.Body) < 12 {
 			return fmt.Errorf("packet body too short - requires 12 bytes, needs to conform to [4b playerId] [4b positionX] [4b positionY]")
 		}
-		playerId := binary.BigEndian.Uint32(packet.body[0:4])
-		posX := int32(binary.BigEndian.Uint32(packet.body[4:8]))
-		posY := int32(binary.BigEndian.Uint32(packet.body[8:12]))
+		playerId := binary.BigEndian.Uint32(p.Body[0:4])
+		posX := int32(binary.BigEndian.Uint32(p.Body[4:8]))
+		posY := int32(binary.BigEndian.Uint32(p.Body[8:12]))
 
 		log.Debug().
 			Uint32("playerId", playerId).
@@ -152,20 +104,20 @@ func (c *Connectio) handlePacket(packet *RawPacket) error {
 	return ErrInvalidPacketType
 }
 
-func (c *Connectio) setHeartbeatPulsed(heartbeatPulsed bool) {
+func (c *ClientServerConnection) setHeartbeatPulsed(heartbeatPulsed bool) {
 	c.heartbeatPulsedMutex.Lock()
 	c.heartbeatPulsed = heartbeatPulsed
 	c.heartbeatPulsedMutex.Unlock()
 }
 
-func (c *Connectio) isHeartbeatPulsed() bool {
+func (c *ClientServerConnection) isHeartbeatPulsed() bool {
 	c.heartbeatPulsedMutex.RLock()
 	heartbeatPulsed := c.heartbeatPulsed
 	c.heartbeatPulsedMutex.RUnlock()
 	return heartbeatPulsed
 }
 
-func (c *Connectio) listen(t *TCP) error {
+func (c *ClientServerConnection) listen(t *TCP) error {
 	if c.started {
 		return fmt.Errorf("connection already listening")
 	}
@@ -203,10 +155,10 @@ func (c *Connectio) listen(t *TCP) error {
 	}()
 
 	for {
-		packetChan := make(chan *RawPacket)
+		packetChan := make(chan *packet.RawPacket)
 
 		go func() {
-			packet, err := ReadPacket(c.conn)
+			p, err := packet.ReadPacket(c.conn)
 			if err != nil {
 				if errors.Is(err, io.EOF) {
 					log.Debug().
@@ -220,7 +172,7 @@ func (c *Connectio) listen(t *TCP) error {
 				packetChan <- nil
 				return
 			}
-			packetChan <- packet
+			packetChan <- p
 		}()
 
 		select {
@@ -277,7 +229,7 @@ func (t *TCP) Start() {
 func main() {
 	zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
 
-	packetsEgress := make(chan *RawPacket)
+	packetsEgress := make(chan *packet.RawPacket)
 	quit := make(chan interface{})
 	port := 2222
 
