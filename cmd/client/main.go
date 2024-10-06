@@ -154,56 +154,7 @@ func (c *ClientConnection) Start() error {
 			}
 		}
 	}
-	// log.Debug().
-	// 	Int8("version", int8(p.Version)).
-	// 	Int8("packet", int8(p.PacketType)).
-	// 	Bytes("packet", p.Body).
-	// 	Msg("packet received")
 }
-
-// for {
-// 	packetChan := make(chan *packet.RawPacket)
-
-// 	go func() {
-// 		p, err := packet.ReadPacket(c.conn)
-// 		if err != nil {
-// 			if errors.Is(err, io.EOF) {
-// 				log.Debug().
-// 					AnErr("err", err).
-// 					Msg("socket received EOF")
-// 			} else {
-// 				log.Error().
-// 					AnErr("err", err).
-// 					Msg("server error")
-// 			}
-// 			packetChan <- nil
-// 			return
-// 		}
-// 		packetChan <- p
-// 	}()
-
-// 	select {
-// 	case packet := <-packetChan:
-// 		if packet != nil {
-// 			if err := c.handlePacket(packet); err != nil {
-// 				log.Error().
-// 					AnErr("err", err).
-// 					Msg("error handling packet")
-// 				c.cancel()
-// 				return nil
-// 			}
-// 		} else {
-// 			log.Debug().Msg("nil packet received, ending closing connection.")
-// 			c.cancel()
-// 			return nil
-// 		}
-// 	case <-c.ctx.Done():
-// 		log.Debug().
-// 			Str("from", "connection listener").
-// 			Msg("termination signal received, ending closing connection.")
-// 		return nil
-// 	}
-// }
 
 func NewClientConnection(conn net.Conn) *ClientConnection {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -223,35 +174,4 @@ func main() {
 
 	client := NewClientConnection(conn)
 	client.Start()
-
-	// go func() {
-	// 	for {
-	// 		if _, err := conn.Read([]byte{
-	// 			0, 0, 0,
-	// 		}); err != nil {
-	// 			fmt.Println("Error writing:", err)
-	// 			return
-	// 		}
-
-	// 	}
-	// }()
-
-	// for {
-	// 	if _, err := conn.Write([]byte{
-	// 		0, 0, 0,
-	// 	}); err != nil {
-	// 		fmt.Println("Error writing:", err)
-	// 		return
-	// 	}
-	// 	if _, err := conn.Write([]byte{
-	// 		0, 1, 12,
-	// 		0xf, 0, 0, 1,
-	// 		0xff, 0xff, 0xff, 0,
-	// 		0, 0, 0, 0xff,
-	// 	}); err != nil {
-	// 		fmt.Println("Error writing:", err)
-	// 		return
-	// 	}
-	// 	time.Sleep(1 * time.Second)
-	// }
 }

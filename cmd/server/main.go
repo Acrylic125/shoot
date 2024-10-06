@@ -15,14 +15,8 @@ import (
 	"shoot.me/shoot/packet"
 )
 
-// type PacketEgressSender = chan<- *packet.RawPacket
-// type PacketEgressReceiver = <-chan *packet.RawPacket
-
 type TCPServer struct {
 	listener net.Listener
-
-	// packetsEgressSender   PacketEgressSender
-	// packetsEgressReceiver PacketEgressReceiver
 
 	quit chan interface{}
 	wg   sync.WaitGroup
@@ -31,7 +25,7 @@ type TCPServer struct {
 	connections      []*ServerSideClientConnection
 }
 
-func NewTCPServer(port uint16, packetsEgress chan *packet.RawPacket) (*TCPServer, error) {
+func NewTCPServer(port int) (*TCPServer, error) {
 	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
 		return nil, err
@@ -39,10 +33,8 @@ func NewTCPServer(port uint16, packetsEgress chan *packet.RawPacket) (*TCPServer
 
 	return &TCPServer{
 		listener: listener,
-		// packetsEgressSender:   packetsEgress,
-		// packetsEgressReceiver: packetsEgress,
-		quit: make(chan interface{}),
-		wg:   sync.WaitGroup{},
+		quit:     make(chan interface{}),
+		wg:       sync.WaitGroup{},
 	}, nil
 }
 
@@ -248,7 +240,6 @@ func (c *ServerSideClientConnection) listen(t *TCPServer) error {
 
 func (t *TCPServer) Broadcast(p *packet.RawPacket) {
 	packetAsBytes := make([]byte, 0, 3+len(p.Body))
-	// packetAsBytes := make([]byte, 0)
 	packetAsBytes = append(packetAsBytes, p.Version, byte(p.PacketType), byte(len(p.Body)))
 	packetAsBytes = append(packetAsBytes, p.Body...)
 
@@ -276,7 +267,6 @@ func (t *TCPServer) Start() {
 		conn, err := t.listener.Accept()
 		if err != nil {
 			select {
-			// case p := <-t.packetsEgressReceiver:
 			case <-t.quit:
 				log.Debug().Msg("quit")
 				return
@@ -317,12 +307,9 @@ func (t *TCPServer) Start() {
 func main() {
 	zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
 
-	// packetsEgress := make(chan *packet.RawPacket)
-
-	quit := make(chan interface{})
 	port := 2222
 
-	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+	tcp, err := NewTCPServer(port)
 	if err != nil {
 		log.Error().
 			AnErr("err", err).
@@ -330,17 +317,5 @@ func main() {
 		return
 	}
 
-	tcp := TCPServer{
-		listener: listener,
-
-		// packetsEgressSender:   packetsEgress,
-		// packetsEgressReceiver: packetsEgress,
-
-		quit: quit,
-		wg:   sync.WaitGroup{},
-
-		connectionsMutex: sync.RWMutex{},
-		connections:      make([]*ServerSideClientConnection, 0),
-	}
 	tcp.Start()
 }
