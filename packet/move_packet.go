@@ -1,3 +1,16 @@
+/**
+ * Packet: Move - Send the player's position to the server. Will be broadcasted
+ * to all other players.
+ * Used for client -> server, server -> client
+ *
+ * Format: [1b version=0] [1b packetType=1] [1b bodySize=12] [4b playerId] [4b positionX] [4b positionY]
+ * Example:
+ * 0x00 0x01 0x0C (Head)
+ * 0xff 0xff 0xff 0xff (Player ID - 0xffffffff)
+ * 0x00 0x00 0x00 0x00 (Position X - 0)
+ * 0x00 0x00 0x00 0x00 (Position Y - 0)
+ **/
+
 package packet
 
 import (

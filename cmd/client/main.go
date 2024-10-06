@@ -29,9 +29,6 @@ func (c *ClientConnection) handlePacket(p *packet.RawPacket) error {
 	}
 	switch p.PacketType {
 	case packet.Move:
-		// playerId := binary.BigEndian.Uint32(p.Body[0:4])
-		// posX := int32(binary.BigEndian.Uint32(p.Body[4:8]))
-		// posY := int32(binary.BigEndian.Uint32(p.Body[8:12]))
 		movePacket, err := packet.ParseMovePacket(p)
 		if err != nil {
 			return err
