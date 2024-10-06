@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -24,31 +23,24 @@ type ClientConnection struct {
 	started bool
 }
 
-func (c *ClientConnection) genPacketHeader(packetType packet.PacketType, bodySize byte) []byte {
-	packetHeader := make([]byte, 3)
-	packetHeader[0] = 0
-	packetHeader[1] = byte(packetType)
-	packetHeader[2] = bodySize
-	return packetHeader
-}
-
 func (c *ClientConnection) handlePacket(p *packet.RawPacket) error {
 	if p == nil {
 		return packet.ErrInvalidPacketType
 	}
 	switch p.PacketType {
 	case packet.Move:
-		if len(p.Body) < 12 {
-			return fmt.Errorf("packet body too short - requires 12 bytes, needs to conform to [4b playerId] [4b positionX] [4b positionY]")
+		// playerId := binary.BigEndian.Uint32(p.Body[0:4])
+		// posX := int32(binary.BigEndian.Uint32(p.Body[4:8]))
+		// posY := int32(binary.BigEndian.Uint32(p.Body[8:12]))
+		movePacket, err := packet.ParseMovePacket(p)
+		if err != nil {
+			return err
 		}
-		playerId := binary.BigEndian.Uint32(p.Body[0:4])
-		posX := int32(binary.BigEndian.Uint32(p.Body[4:8]))
-		posY := int32(binary.BigEndian.Uint32(p.Body[8:12]))
 
 		log.Debug().
-			Uint32("playerId", playerId).
-			Int32("x", posX).
-			Int32("y", posY).
+			Uint32("playerId", movePacket.PlayerId).
+			Int32("x", movePacket.PositionX).
+			Int32("y", movePacket.PositionY).
 			Msg("player move")
 		return nil
 	}
@@ -63,7 +55,8 @@ func (c *ClientConnection) heartbeat() {
 				log.Debug().Msg("heartbeat loop terminated")
 				return
 			case <-time.After(time.Second * 1):
-				if _, err := c.conn.Write(c.genPacketHeader(packet.Heartbeat, 0)); err != nil {
+				p := packet.HeartbeatPacket{}
+				if _, err := c.conn.Write(p.ToBytes()); err != nil {
 					log.Error().
 						AnErr("err", err).
 						Msg("error writing heartbeat")

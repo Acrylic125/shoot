@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -90,17 +89,19 @@ func (c *ServerSideClientConnection) handlePacket(p *packet.RawPacket) (egress *
 		c.setHeartbeatPulsed(true)
 		return nil, nil
 	case packet.Move:
-		if len(p.Body) < 12 {
-			return nil, fmt.Errorf("packet body too short - requires 12 bytes, needs to conform to [4b playerId] [4b positionX] [4b positionY]")
+		// playerId := binary.BigEndian.Uint32(p.Body[0:4])
+		// posX := int32(binary.BigEndian.Uint32(p.Body[4:8]))
+		// posY := int32(binary.BigEndian.Uint32(p.Body[8:12]))
+
+		movePacket, err := packet.ParseMovePacket(p)
+		if err != nil {
+			return nil, err
 		}
-		playerId := binary.BigEndian.Uint32(p.Body[0:4])
-		posX := int32(binary.BigEndian.Uint32(p.Body[4:8]))
-		posY := int32(binary.BigEndian.Uint32(p.Body[8:12]))
 
 		log.Debug().
-			Uint32("playerId", playerId).
-			Int32("x", posX).
-			Int32("y", posY).
+			Uint32("playerId", movePacket.PlayerId).
+			Int32("x", movePacket.PositionX).
+			Int32("y", movePacket.PositionY).
 			Msg("player move")
 
 		log.Debug().Msg("sending packet to egress")
@@ -230,7 +231,6 @@ func (c *ServerSideClientConnection) listen(t *TCPServer) error {
 			return nil
 		}
 	}
-
 }
 
 func (t *TCPServer) Broadcast(p *packet.RawPacket) {

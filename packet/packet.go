@@ -16,11 +16,6 @@ var (
 
 type PacketType byte
 
-const (
-	Heartbeat PacketType = 0
-	Move      PacketType = 1
-)
-
 type RawPacket struct {
 	Body       []byte
 	Version    byte
@@ -103,4 +98,12 @@ func ReadPacket(connReader io.Reader) (*RawPacket, error) {
 	}
 
 	return &p, nil
+}
+
+func GenPacket(packetType PacketType, bodySize byte) []byte {
+	packetHeader := make([]byte, 3, 3+bodySize)
+	packetHeader[0] = 0
+	packetHeader[1] = byte(packetType)
+	packetHeader[2] = bodySize
+	return packetHeader
 }
