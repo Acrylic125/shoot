@@ -89,10 +89,6 @@ func (c *ServerSideClientConnection) handlePacket(p *packet.RawPacket) (egress *
 		c.setHeartbeatPulsed(true)
 		return nil, nil
 	case packet.Move:
-		// playerId := binary.BigEndian.Uint32(p.Body[0:4])
-		// posX := int32(binary.BigEndian.Uint32(p.Body[4:8]))
-		// posY := int32(binary.BigEndian.Uint32(p.Body[8:12]))
-
 		movePacket, err := packet.ParseMovePacket(p)
 		if err != nil {
 			return nil, err
@@ -129,7 +125,7 @@ func (c *ServerSideClientConnection) isHeartbeatPulsed() bool {
 	return heartbeatPulsed
 }
 
-func (c *ServerSideClientConnection) listen(t *TCPServer) error {
+func (c *ServerSideClientConnection) Listen(t *TCPServer) error {
 	if c.started {
 		return fmt.Errorf("connection already listening")
 	}
@@ -215,9 +211,7 @@ func (c *ServerSideClientConnection) listen(t *TCPServer) error {
 					return nil
 				}
 				if egress != nil {
-					for _, p := range *egress {
-						t.Broadcast(p)
-					}
+					t.Broadcast(*egress)
 				}
 			} else {
 				log.Debug().Msg("nil packet received, ending closing connection.")
@@ -233,25 +227,25 @@ func (c *ServerSideClientConnection) listen(t *TCPServer) error {
 	}
 }
 
-func (t *TCPServer) Broadcast(p *packet.RawPacket) {
-	packetAsBytes := make([]byte, 0, 3+len(p.Body))
-	packetAsBytes = append(packetAsBytes, p.Version, byte(p.PacketType), byte(len(p.Body)))
-	packetAsBytes = append(packetAsBytes, p.Body...)
-
-	log.Debug().Bytes("packet", packetAsBytes).
-		Int("version", int(p.Version)).
-		Int("packetType", int(p.PacketType)).
-		Int("bodyLength", len(p.Body)).
-		Int("packetAsBytes Length", len(packetAsBytes)).
-		Msg("broadcasting packet")
-	// Send packet to all connections
-	t.connectionsMutex.RLock()
-	for i, conn := range t.connections {
-		log.Debug().Int("index", i).Msg("Sending packet to connection")
-		conn.conn.Write(packetAsBytes)
+func (t *TCPServer) Broadcast(packets []*packet.RawPacket) {
+	all := make([]byte, 0)
+	for _, p := range packets {
+		all = append(all, p.Version, byte(p.PacketType), byte(len(p.Body)))
+		all = append(all, p.Body...)
 	}
+
+	t.connectionsMutex.RLock()
+	wg := sync.WaitGroup{}
+	wg.Add(len(t.connections))
+	for _, conn := range t.connections {
+		// No point awaiting for the previous iteration to finish
+		go func() {
+			conn.conn.Write(all)
+			wg.Done()
+		}()
+	}
+	wg.Wait()
 	t.connectionsMutex.RUnlock()
-	log.Debug().Msg("sending packet to connections")
 }
 
 func (t *TCPServer) Start() {
@@ -279,7 +273,7 @@ func (t *TCPServer) Start() {
 			t.connections = append(t.connections, _conn)
 			t.connectionsMutex.Unlock()
 
-			_conn.listen(t)
+			_conn.Listen(t)
 			defer func() {
 				t.connectionsMutex.Lock()
 				defer t.connectionsMutex.Unlock()
