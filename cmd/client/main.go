@@ -156,22 +156,26 @@ func (c *ClientConnection) Start() error {
 	}
 }
 
-func NewClientConnection(conn net.Conn) *ClientConnection {
+func NewClientConnection(address string) (*ClientConnection, error) {
+	conn, err := net.Dial("tcp", address)
+	if err != nil {
+		return nil, err
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &ClientConnection{
 		conn:   conn,
 		ctx:    ctx,
 		cancel: cancel,
-	}
+	}, nil
 }
 
 func main() {
-	conn, err := net.Dial("tcp", "localhost:2222")
+	client, err := NewClientConnection("localhost:2222")
 	if err != nil {
-		fmt.Println("Error connecting:", err)
+		log.Error().
+			AnErr("err", err).
+			Msg("client error")
 		return
 	}
-
-	client := NewClientConnection(conn)
 	client.Start()
 }

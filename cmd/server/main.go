@@ -55,9 +55,6 @@ type ServerSideClientConnection struct {
 	// Connection state
 	conn net.Conn
 
-	// Egress
-	// packetEgress chan<- *packet.RawPacket
-
 	// Simple heartbeat detection
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -72,8 +69,6 @@ func NewConnection(conn net.Conn) *ServerSideClientConnection {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &ServerSideClientConnection{
 		conn: conn,
-
-		// packetEgress: packetEgress,
 
 		ctx:    ctx,
 		cancel: cancel,
